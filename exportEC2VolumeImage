@@ -1,0 +1,212 @@
+#!/bin/bash
+#
+# Create an image of an Amazon EC2 volume, compress it, and send it to the destination of your choice
+#
+# disclaimer header stuff
+
+# This script requires the "aws" command line tool to be installed and configured with 
+# access and secret keys with permission to perform EC2 operations.  
+# See https://aws.amazon.com/cli/ for further details
+
+
+# program configs:
+
+# mount point
+mountPoint="/dev/xvdp"
+
+# Append a timestamp to the user-provideed filename
+suffix=$(date +%Y%m%d_%H%M%S)
+
+if [ -b $mountPoint ]; then
+	echo "A device is already present at ${mountPoint}. Exiting."
+	exit 0
+fi
+
+
+# Check for the right number of command line args
+
+if [ "$#" -ne 4 ]; then
+	echo "usage: aws-create-image volume-id region this-instance-id scratch"
+	exit 0
+fi
+
+
+# make sure scratch is a directory
+
+if [ ! -d "${4}" ]; then
+	echo "Scratch folder doesn't appear to be a folder. Exiting."
+	exit 0
+fi
+
+
+
+# Some easier-to-follow variable names
+
+volumeId=${1}
+region=${2}
+buildId=${3}
+
+# Build a meaningful filename for the image file
+filename="${4}/ec2VolImg.${volumeId}.${suffix}.img"
+
+# Verify that the volume is valid
+
+describeVolumes=$(aws ec2 describe-volumes --output text --region ${region} --volume-id ${volumeId} 2>&1)
+
+if [ "$?" -ne 0 ]; then
+	echo "The specified region or volumeID is not valid, or the AWS CLI tool is not configured properly."
+	echo $describeVolumes
+	exit 255
+fi
+
+availabilityZone=$(echo ${describeVolumes} | cut -d\  -f2)
+
+echo "Volume ${volumeId} is in availability zone ${availabilityZone}"
+
+
+# Create a snapshot from the volume
+createSnapshot=$(aws ec2 create-snapshot --output text --region ${region} --volume-id ${volumeId} --description "SnapImg")
+
+if [ "$?" -ne 0 ]; then
+               echo "The specified region or volumeID is not valid, or the AWS CLI tool is not configured properly."
+	exit 255
+       fi
+
+snapshotId=$(echo ${createSnapshot} | awk '{print $4}')
+
+
+#echo DEBUG $createSnapshot
+#echo DEBUG $snapshotId
+#echo DEBUG $snapshotStatus
+
+echo -n "Creating a snapshot of ${volumeId}..."
+
+while [ "$snapshotStatus" != "completed" ];  do
+	echo -n "."
+	snapshotStatus=$(aws ec2 describe-snapshots --output text --region ${region} --snapshot-id ${snapshotId} | cut -f8) 
+	sleep 2
+done
+
+echo "[OK]"
+
+# Create a new volume from the snapshot
+
+echo -n "Creating a new volume from snapshot ${snapshotId}..."
+
+createVolume=$(aws ec2 create-volume --output text --availability-zone $availabilityZone --snapshot-id ${snapshotId})
+newVolumeId=$(echo ${createVolume} | awk '{print $7}' )
+
+unset status
+
+while [ "$status" != "available" ];  do
+	echo -n "."
+	describeVolumes=$(aws ec2 describe-volumes --output text --region ${region} --volume-id ${newVolumeId})
+	status=$(echo ${describeVolumes} | awk '{print $7}')
+
+	sleep 2
+done
+
+echo "[OK]"
+
+
+echo -n "Waiting for volume attach operation to complete..."
+
+attachVolume=$(aws ec2 attach-volume --output text --region ${region} --volume-id ${newVolumeId} --instance-id ${buildId} --device ${mountPoint})
+
+if [ "$?" -ne 0 ]; then
+	echo "The specified region or volumeID is not valid, or the AWS CLI tool is not configured properly."
+	exit 255
+fi
+
+unset status
+
+while [ "$status" != "attached" ];  do
+	echo -n "."
+	describeVolumes=$(aws ec2 describe-volumes --output text --region ${region} --volume-id ${newVolumeId} | grep 'ATTACHMENTS')
+	status=$(echo ${describeVolumes} | awk '{print $6}')
+	mountPoint=$(echo ${describeVolumes} | awk '{print $4}')
+
+	sleep 2
+done
+
+echo "[OK]"
+
+# Make sure the volume is actually attached 
+if [ ! -b $mountPoint ]; then
+        echo "The specified device ${mountPoint} is not available. Exiting."
+        exit 0
+fi
+
+
+echo "Creating image..."
+
+dd if=${mountPoint} of=${filename} bs=1M status=progress
+
+if [ ! -f ${filename} ]; then
+	echo "Image file creation failed. Exiting."
+	exit 0
+fi
+
+echo -e "\nImage File Contents:\n"
+fdisk -lu ${filename}
+
+echo "Compressing image..."
+
+gzip ${filename}
+
+if [ ! -f "${filename}.gz" ]; then
+	echo "Image file compression failed. Exiting."
+	exit 0
+fi
+
+echo "Image creation complete."
+echo -n "Detaching volume..."
+
+detachVolume=$(aws ec2 detach-volume --output text --region ${region} --volume-id ${newVolumeId})
+unset status
+
+while [ "$status" != "available" ];  do
+	echo -n "."
+	describeVolumes=$(aws ec2 describe-volumes --output text --region ${region} --volume-id ${newVolumeId} | grep 'VOLUMES')
+	status=$(echo ${describeVolumes} | awk '{print $7}')
+
+	sleep 2
+done
+
+echo "[OK]"
+
+# Delete the volume and snapshot created earlier
+
+echo -n "Deleting the snapshot..."
+
+deleteSnapshot=$(aws ec2 delete-snapshot --output text --region ${region} --snapshot-id ${snapshotId})
+if [ "$?" -ne 0 ]; then
+        echo "An error occured while deleting the snapshot:"
+	echo ${deleteSnapshot}
+        exit 255
+fi
+
+echo "[OK]"
+
+echo -n "Deleting the temporary volume..."
+
+deleteVolume=$(aws ec2 delete-volume --output text --region ${region} --volume-id ${newVolumeId})
+
+if [ "$?" -ne 0 ]; then
+        echo "An error occured while deleting the volume:"
+	echo ${deleteVolume}
+        exit 255
+fi
+
+echo "[OK]"
+
+
+# Add in your code to move or copy the image file as needed.  As an example...
+
+echo "Moving ${filename}.gz to Google Drive..."
+
+#rclone move ${filename}.gz FOSGDrive:/isos/
+
+# Done
+
+echo "Done."
