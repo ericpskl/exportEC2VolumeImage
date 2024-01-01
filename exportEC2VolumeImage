@@ -3,7 +3,7 @@
 #
 # for more information, see https://fireoakstrategies.com/automate-the-creation-and-export-of-ec2-volume-images
 #
-# eric.smith@fireoakstrategies.com
+# eric.smith@cyberstoics.io
 # inital release: 6 Feb 2019
 #
 # This script requires the "aws" command line tool to be installed and configured with 
