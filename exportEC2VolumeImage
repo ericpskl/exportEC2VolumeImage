@@ -1,7 +1,6 @@
 #!/bin/bash
 # exportEC2VolumeImage: Create an image of an Amazon EC2 volume, compress it, and send it to the destination of your choice 
 #
-# for more information, see https://fireoakstrategies.com/automate-the-creation-and-export-of-ec2-volume-images
 #
 # eric.smith@cyberstoics.io
 # inital release: 6 Feb 2019
